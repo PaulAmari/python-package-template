@@ -10,11 +10,11 @@ VERSION := latest
 #* Poetry
 .PHONY: poetry-download
 poetry-download:
-	curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/install-poetry.py | $(PYTHON) -
+	curl -sSL https://install.python-poetry.org | $(PYTHON) -
 
 .PHONY: poetry-remove
 poetry-remove:
-	curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/install-poetry.py | $(PYTHON) - --uninstall
+	curl -sSL https://install.python-poetry.org | $(PYTHON) - --uninstall
 
 #* Installation
 .PHONY: install
@@ -27,49 +27,84 @@ install:
 pre-commit-install:
 	poetry run pre-commit install
 
+.PHONY: trivy-install
+trivy-install:
+	sudo apt-get install trivy
+
 #* Formatters
-.PHONY: codestyle
-codestyle:
-	poetry run pyupgrade --exit-zero-even-if-changed --py{{ cookiecutter.minimal_python_version.replace('.', '') }}-plus **/*.py
-	poetry run isort --settings-path pyproject.toml ./
-	poetry run black --config pyproject.toml ./
+.PHONY: format-codestyle
+format-codestyle:
+	poetry run docformatter -r -in-place --black --pre-summary-newline ./
+	poetry run pyupgrade --exit-zero-even-if-changed --py39-plus **/*.py
+	poetry run ruff format --config pyproject.toml ./
 
 .PHONY: formatting
-formatting: codestyle
+formatting: format-codestyle
 
-#* Linting
-.PHONY: test
-test:
-	PYTHONPATH=$(PYTHONPATH) poetry run pytest -c pyproject.toml --cov-report=html --cov={{ cookiecutter.project_name.lower().replace(' ', '_').replace('-', '_') }} tests/
-	poetry run coverage-badge -o assets/images/coverage.svg -f
+#* Testing
 
-.PHONY: check-codestyle
-check-codestyle:
-	poetry run isort --diff --check-only --settings-path pyproject.toml ./
-	poetry run black --diff --check --config pyproject.toml ./
-	poetry run darglint --verbosity 2 {{ cookiecutter.project_name.lower().replace(' ', '_').replace('-', '_') }} tests
+.PHONY: tests
+tests:
+	poetry run tox -e py39,py310,py311,coverage -p
 
-.PHONY: mypy
-mypy:
-	poetry run mypy --config-file pyproject.toml ./
-
-.PHONY: check-safety
-check-safety:
-	poetry check
-	poetry run safety check --full-report
-	poetry run bandit -ll --recursive {{ cookiecutter.project_name.lower().replace(' ', '_').replace('-', '_') }} tests
+.PHONY: coverage
+coverage:
+	poetry run tox -e coverage
 
 .PHONY: lint
-lint: test check-codestyle mypy check-safety
+lint:
+	poetry run tox -e lint
+
+
+.PHONY: format
+format:
+	poetry run tox -e format
+
+.PHONY: safety
+safety:
+	poetry run tox -e safety
+
+.PHONY: type
+type:
+	poetry run tox -e type
+
+.PHONY: checks
+checks:
+	poetry run tox -e codestyle,lint,safety,type -p
 
 .PHONY: update-dev-deps
 update-dev-deps:
-	poetry add -D bandit@latest darglint@latest "isort[colors]@latest" mypy@latest pre-commit@latest pydocstyle@latest pylint@latest pytest@latest pyupgrade@latest safety@latest coverage@latest coverage-badge@latest pytest-html@latest pytest-cov@latest
-	poetry add -D --allow-prereleases black@latest
+	poetry add -G dev bandit@latest mypy@latest pre-commit@latest pylint@latest pytest@latest pyupgrade@latest safety@latest coverage@latest coverage-badge@latest pytest-html@latest pytest-cov@latest
+	poetry add -G dev --allow-prereleases ruff@latest
+
+#* SBOM
+.PHONY: generate-sbom
+generate-sbom:
+	mkdir -p ./analysis/sbom
+	poetry run cyclonedx-py environment > $(ANALYSIS_PATH)/sbom/cyclonedx_sbom.json
+	syft {{ cookiecutter.project_name.lower().replace(' ', '_').replace('-', '_') }}:latest -o=cyclonedx-json --file=./analysis/sbom/syft_sbom.json
+
+#* Vulnerabilities Analysis
+.PHONY: check-vulnerabilities
+check-vulnerabilities:
+	mkdir -p $(ANALYSIS_PATH)/cve
+	trivy sbom $(ANALYSIS_PATH)/sbom/syft_sbom.json -f json -o ./analysis/cve/trivy_cve.json
+	trivy sbom $(ANALYSIS_PATH)/sbom/syft_sbom.json -f table
+
+#* Licenses Analysis
+.PHONY: licenses
+licenses:
+	mkdir -p $(ANALYSIS_PATH)/license
+	poetry run pip-licenses --summary --from=classifier --with-system -f csv --output-file $(ANALYSIS_PATH)/license/license_summary.csv
+	poetry run pip-licenses -o license -f csv --output-file $(ANALYSIS_PATH)/license/licenses.csv
+
+.PHONY:  check-licenses
+check-licenses:
+	poetry run pip-licenses --fail-on="UNKNOWN"
 
 #* Docker
 # Example: make docker-build VERSION=latest
-# Example: make docker-build IMAGE=some_name VERSION={{ cookiecutter.version }}
+# Example: make docker-build IMAGE=some_name VERSION=0.1.0
 .PHONY: docker-build
 docker-build:
 	@echo Building docker $(IMAGE):$(VERSION) ...
@@ -77,8 +112,15 @@ docker-build:
 		-t $(IMAGE):$(VERSION) . \
 		-f ./docker/Dockerfile --no-cache
 
+.PHONY: docker-build-alpine
+docker-build-alpine:
+	@echo Building docker $(IMAGE):$(VERSION) ...
+	docker build \
+		-t $(IMAGE):$(VERSION) . \
+		-f ./docker/alpine/Dockerfile --no-cache
+
 # Example: make docker-remove VERSION=latest
-# Example: make docker-remove IMAGE=some_name VERSION={{ cookiecutter.version }}
+# Example: make docker-remove IMAGE=some_name VERSION=0.1.0
 .PHONY: docker-remove
 docker-remove:
 	@echo Removing docker $(IMAGE):$(VERSION) ...
